@@ -16,18 +16,13 @@ MAX_RATING = 3.9
 MIN_REVIEWS = 50
 MAX_REVIEWS = 2000
 
-TRUSTPILOT_CATEGORIES = [
-    "software_company",
-    "ecommerce",
-    "money_insurance",
-    "health_medical",
-]
-
-G2_CATEGORIES = [
-    "crm",
-    "ecommerce-platforms",
-    "accounting",
-    "project-management",
+SEARCH_QUERIES = [
+    "software company",
+    "ecommerce store",
+    "fintech",
+    "healthcare software",
+    "saas platform",
+    "online marketplace",
 ]
 
 
@@ -45,9 +40,7 @@ def get_existing_companies(sheet):
         return set()
 
 
-def run_apify_actor(actor_id, input_data):
-    """Run an Apify actor and wait for results."""
-    # Start the run
+def run_actor_and_wait(actor_id, input_data, wait=40):
     resp = requests.post(
         f"{APIFY_BASE}/acts/{actor_id}/runs",
         headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
@@ -55,14 +48,13 @@ def run_apify_actor(actor_id, input_data):
         timeout=30,
     )
     if resp.status_code not in (200, 201):
-        print(f"Failed to start actor {actor_id}: {resp.text[:200]}")
+        print(f"  Failed to start {actor_id}: {resp.text[:150]}")
         return []
 
     run_id = resp.json()["data"]["id"]
-    print(f"  Actor started, run ID: {run_id}")
+    print(f"  Run started: {run_id}")
 
-    # Wait for completion (max 3 minutes)
-    for _ in range(36):
+    for _ in range(24):
         time.sleep(5)
         status_resp = requests.get(
             f"{APIFY_BASE}/actor-runs/{run_id}",
@@ -71,45 +63,38 @@ def run_apify_actor(actor_id, input_data):
         )
         status = status_resp.json()["data"]["status"]
         if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
-            print(f"  Run status: {status}")
+            print(f"  Status: {status}")
             break
 
     if status != "SUCCEEDED":
         return []
 
-    # Get results
     dataset_id = status_resp.json()["data"]["defaultDatasetId"]
-    results_resp = requests.get(
+    results = requests.get(
         f"{APIFY_BASE}/datasets/{dataset_id}/items?limit=100",
         headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
         timeout=30,
     )
-    return results_resp.json()
+    return results.json() if isinstance(results.json(), list) else []
 
 
 def scrape_trustpilot(existing):
     prospects = []
 
-    for category in TRUSTPILOT_CATEGORIES:
-        print(f"Scraping Trustpilot: {category}...")
-        items = run_apify_actor(
-            "maxcopell~trustpilot-scraper",
-            {
-                "startUrls": [
-                    {
-                        "url": f"https://www.trustpilot.com/categories/{category}?sort=latest&ratingFilter=poor&ratingFilter=bad"
-                    }
-                ],
-                "maxItems": 20,
-            },
+    for query in SEARCH_QUERIES:
+        print(f"Searching Trustpilot: '{query}'...")
+        items = run_actor_and_wait(
+            "burbn~trustpilot-search-scraper",
+            {"query": query, "maxItems": 100},
         )
 
         for item in items:
             try:
                 name = item.get("name", "").strip()
-                rating = float(item.get("score", item.get("rating", 0)))
-                count = int(item.get("numberOfReviews", item.get("reviewCount", 0)))
-                website = item.get("website", item.get("url", ""))
+                rating = float(item.get("trustScore", item.get("rating", 0)))
+                count = int(item.get("reviewCount", 0))
+                website = item.get("website", item.get("domain", ""))
+                country = item.get("country", "")
 
                 if not name or name in existing:
                     continue
@@ -118,58 +103,14 @@ def scrape_trustpilot(existing):
                 if not (MIN_REVIEWS <= count <= MAX_REVIEWS):
                     continue
 
-                prospects.append({
-                    "company": name,
-                    "website": website,
-                    "rating": rating,
-                    "platform": f"Trustpilot",
-                    "review_count": count,
-                    "pain_point": f"{rating}★ on Trustpilot — needs reputation help",
-                    "status": "Not contacted",
-                })
-                existing.add(name)
-
-            except Exception as e:
-                continue
-
-        print(f"  Found: {len([p for p in prospects if 'Trustpilot' in p['platform']])}")
-        time.sleep(2)
-
-    return prospects
-
-
-def scrape_g2(existing):
-    prospects = []
-
-    for category in G2_CATEGORIES:
-        print(f"Scraping G2: {category}...")
-        items = run_apify_actor(
-            "curious_coder~g2-scraper",
-            {
-                "categoryUrl": f"https://www.g2.com/categories/{category}?order=lowest_g2_score",
-                "maxItems": 20,
-            },
-        )
-
-        for item in items:
-            try:
-                name = item.get("name", item.get("productName", "")).strip()
-                rating = float(item.get("rating", item.get("starRating", 0)))
-                count = int(item.get("reviewCount", item.get("numberOfReviews", 100)))
-                website = item.get("website", item.get("url", ""))
-
-                if not name or name in existing:
-                    continue
-                if not (MIN_RATING <= rating <= MAX_RATING):
-                    continue
 
                 prospects.append({
                     "company": name,
                     "website": website,
                     "rating": rating,
-                    "platform": "G2",
+                    "platform": "Trustpilot",
                     "review_count": count,
-                    "pain_point": f"{rating}★ on G2 — needs reputation help",
+                    "pain_point": f"{rating}★ on Trustpilot ({count} reviews) — needs reputation help",
                     "status": "Not contacted",
                 })
                 existing.add(name)
@@ -177,8 +118,8 @@ def scrape_g2(existing):
             except Exception:
                 continue
 
-        print(f"  Found: {len([p for p in prospects if p['platform'] == 'G2'])}")
-        time.sleep(2)
+        print(f"  Qualified prospects so far: {len(prospects)}")
+        time.sleep(3)
 
     return prospects
 
@@ -212,19 +153,16 @@ def main():
     print(f"ORM Scraper started — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
     if not APIFY_TOKEN:
-        print("ERROR: APIFY_TOKEN secret not set.")
+        print("ERROR: APIFY_TOKEN not set.")
         return
 
     sheet = get_sheet()
     existing = get_existing_companies(sheet)
-    print(f"Existing prospects in sheet: {len(existing)}")
+    print(f"Existing prospects: {len(existing)}")
 
-    all_prospects = []
-    all_prospects.extend(scrape_trustpilot(existing))
-    all_prospects.extend(scrape_g2(existing))
-
-    push_to_sheet(sheet, all_prospects)
-    print(f"Done. Total new prospects today: {len(all_prospects)}")
+    prospects = scrape_trustpilot(existing)
+    push_to_sheet(sheet, prospects)
+    print(f"Done. Total new prospects today: {len(prospects)}")
 
 
 if __name__ == "__main__":
