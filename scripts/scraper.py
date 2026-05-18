@@ -1,179 +1,186 @@
 import requests
-from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 import json
 import os
 import time
-import random
 from datetime import datetime
 
 SHEET_ID = "1gqiRjuyaxVuas6dKFseGhbp0wSkY_WLC8KPIEeB9-aY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-
-HEADERS_LIST = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/118.0.0.0 Safari/537.36",
-]
-
-CATEGORIES = [
-    ("software_company", "Software"),
-    ("ecommerce", "E-commerce"),
-    ("money_insurance", "Fintech"),
-    ("health_medical", "Healthcare"),
-    ("travel_holidays_tours", "Travel"),
-]
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
+APIFY_BASE = "https://api.apify.com/v2"
 
 MIN_RATING = 2.0
 MAX_RATING = 3.9
 MIN_REVIEWS = 50
 MAX_REVIEWS = 2000
-MAX_PER_CATEGORY = 15
+
+TRUSTPILOT_CATEGORIES = [
+    "software_company",
+    "ecommerce",
+    "money_insurance",
+    "health_medical",
+]
+
+G2_CATEGORIES = [
+    "crm",
+    "ecommerce-platforms",
+    "accounting",
+    "project-management",
+]
 
 
 def get_sheet():
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-    creds_dict = json.loads(creds_json)
+    creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS"))
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
-    sheet = client.open_by_key(SHEET_ID).sheet1
-    return sheet
+    return client.open_by_key(SHEET_ID).sheet1
 
 
 def get_existing_companies(sheet):
     try:
-        records = sheet.col_values(1)[1:]
-        return set(records)
+        return set(sheet.col_values(1)[1:])
     except:
         return set()
 
 
-def scrape_trustpilot_category(category_id, category_name, existing):
-    results = []
-    url = f"https://www.trustpilot.com/categories/{category_id}?sort=latest&ratingFilter=poor&ratingFilter=bad"
+def run_apify_actor(actor_id, input_data):
+    """Run an Apify actor and wait for results."""
+    # Start the run
+    resp = requests.post(
+        f"{APIFY_BASE}/acts/{actor_id}/runs",
+        headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+        json=input_data,
+        timeout=30,
+    )
+    if resp.status_code not in (200, 201):
+        print(f"Failed to start actor {actor_id}: {resp.text[:200]}")
+        return []
 
-    try:
-        headers = {"User-Agent": random.choice(HEADERS_LIST)}
-        resp = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
+    run_id = resp.json()["data"]["id"]
+    print(f"  Actor started, run ID: {run_id}")
 
-        cards = soup.select("div[class*='businessUnitResult']")
-        if not cards:
-            cards = soup.select("div[class*='styles_businessUnitResult']")
+    # Wait for completion (max 3 minutes)
+    for _ in range(36):
+        time.sleep(5)
+        status_resp = requests.get(
+            f"{APIFY_BASE}/actor-runs/{run_id}",
+            headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+            timeout=15,
+        )
+        status = status_resp.json()["data"]["status"]
+        if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
+            print(f"  Run status: {status}")
+            break
 
-        for card in cards[:MAX_PER_CATEGORY]:
+    if status != "SUCCEEDED":
+        return []
+
+    # Get results
+    dataset_id = status_resp.json()["data"]["defaultDatasetId"]
+    results_resp = requests.get(
+        f"{APIFY_BASE}/datasets/{dataset_id}/items?limit=100",
+        headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+        timeout=30,
+    )
+    return results_resp.json()
+
+
+def scrape_trustpilot(existing):
+    prospects = []
+
+    for category in TRUSTPILOT_CATEGORIES:
+        print(f"Scraping Trustpilot: {category}...")
+        items = run_apify_actor(
+            "maxcopell~trustpilot-scraper",
+            {
+                "startUrls": [
+                    {
+                        "url": f"https://www.trustpilot.com/categories/{category}?sort=latest&ratingFilter=poor&ratingFilter=bad"
+                    }
+                ],
+                "maxItems": 20,
+            },
+        )
+
+        for item in items:
             try:
-                name_el = card.select_one("p[class*='title']") or card.select_one("span[class*='title']")
-                rating_el = card.select_one("span[class*='ratingText']") or card.select_one("p[class*='ratingText']")
-                count_el = card.select_one("span[class*='reviewsCount']") or card.select_one("p[class*='reviewsCount']")
-                link_el = card.select_one("a[href*='/review/']")
+                name = item.get("name", "").strip()
+                rating = float(item.get("score", item.get("rating", 0)))
+                count = int(item.get("numberOfReviews", item.get("reviewCount", 0)))
+                website = item.get("website", item.get("url", ""))
 
-                if not name_el or not rating_el:
+                if not name or name in existing:
                     continue
-
-                name = name_el.get_text(strip=True)
-                rating_text = rating_el.get_text(strip=True).replace(",", ".")
-                rating = float(''.join(c for c in rating_text if c.isdigit() or c == '.'))
-                count_text = count_el.get_text(strip=True).replace(",", "").replace(".", "") if count_el else "0"
-                count = int(''.join(c for c in count_text if c.isdigit()) or 0)
-
                 if not (MIN_RATING <= rating <= MAX_RATING):
                     continue
                 if not (MIN_REVIEWS <= count <= MAX_REVIEWS):
                     continue
-                if name in existing:
-                    continue
 
-                website = ""
-                if link_el:
-                    slug = link_el["href"].replace("/review/", "")
-                    website = f"https://www.{slug}"
-
-                results.append({
+                prospects.append({
                     "company": name,
                     "website": website,
                     "rating": rating,
-                    "platform": f"Trustpilot ({category_name})",
+                    "platform": f"Trustpilot",
                     "review_count": count,
-                    "pain_point": f"{rating}★ on Trustpilot — reputation issue",
-                    "status": "Not contacted"
+                    "pain_point": f"{rating}★ on Trustpilot — needs reputation help",
+                    "status": "Not contacted",
                 })
-
                 existing.add(name)
-                time.sleep(random.uniform(0.5, 1.5))
 
-            except Exception:
+            except Exception as e:
                 continue
 
-    except Exception as e:
-        print(f"Error scraping {category_name}: {e}")
+        print(f"  Found: {len([p for p in prospects if 'Trustpilot' in p['platform']])}")
+        time.sleep(2)
 
-    return results
+    return prospects
 
 
-def scrape_g2_category(category_slug, category_name, existing):
-    results = []
-    url = f"https://www.g2.com/categories/{category_slug}?order=lowest_g2_score"
+def scrape_g2(existing):
+    prospects = []
 
-    try:
-        headers = {"User-Agent": random.choice(HEADERS_LIST)}
-        resp = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
+    for category in G2_CATEGORIES:
+        print(f"Scraping G2: {category}...")
+        items = run_apify_actor(
+            "curious_coder~g2-scraper",
+            {
+                "categoryUrl": f"https://www.g2.com/categories/{category}?order=lowest_g2_score",
+                "maxItems": 20,
+            },
+        )
 
-        cards = soup.select("div.product-listing")
-        if not cards:
-            cards = soup.select("li[class*='product-listing']")
-
-        for card in cards[:MAX_PER_CATEGORY]:
+        for item in items:
             try:
-                name_el = card.select_one("div.product-listing__product-name") or card.select_one("a[class*='product-name']")
-                rating_el = card.select_one("span[class*='fw-semibold']") or card.select_one("span[class*='rating']")
-                count_el = card.select_one("span[class*='ratings-count']")
+                name = item.get("name", item.get("productName", "")).strip()
+                rating = float(item.get("rating", item.get("starRating", 0)))
+                count = int(item.get("reviewCount", item.get("numberOfReviews", 100)))
+                website = item.get("website", item.get("url", ""))
 
-                if not name_el:
+                if not name or name in existing:
                     continue
-
-                name = name_el.get_text(strip=True)
-                rating = 3.0
-                if rating_el:
-                    try:
-                        rating = float(rating_el.get_text(strip=True).split()[0])
-                    except:
-                        pass
-
-                count = 100
-                if count_el:
-                    try:
-                        count = int(''.join(c for c in count_el.get_text() if c.isdigit()) or 100)
-                    except:
-                        pass
-
                 if not (MIN_RATING <= rating <= MAX_RATING):
                     continue
-                if name in existing:
-                    continue
 
-                results.append({
+                prospects.append({
                     "company": name,
-                    "website": "",
+                    "website": website,
                     "rating": rating,
-                    "platform": f"G2 ({category_name})",
+                    "platform": "G2",
                     "review_count": count,
-                    "pain_point": f"{rating}★ on G2 — reputation issue",
-                    "status": "Not contacted"
+                    "pain_point": f"{rating}★ on G2 — needs reputation help",
+                    "status": "Not contacted",
                 })
-
                 existing.add(name)
-                time.sleep(random.uniform(0.5, 1.5))
 
             except Exception:
                 continue
 
-    except Exception as e:
-        print(f"Error scraping G2 {category_name}: {e}")
+        print(f"  Found: {len([p for p in prospects if p['platform'] == 'G2'])}")
+        time.sleep(2)
 
-    return results
+    return prospects
 
 
 def push_to_sheet(sheet, prospects):
@@ -181,9 +188,8 @@ def push_to_sheet(sheet, prospects):
         print("No new prospects found today.")
         return
 
-    rows = []
-    for p in prospects:
-        rows.append([
+    rows = [
+        [
             p["company"],
             p["website"],
             str(p["rating"]),
@@ -194,39 +200,28 @@ def push_to_sheet(sheet, prospects):
             "",  # Decision maker email
             p["pain_point"],
             p["status"],
-        ])
+        ]
+        for p in prospects
+    ]
 
     sheet.append_rows(rows, value_input_option="RAW")
     print(f"Added {len(rows)} new prospects to sheet.")
 
 
 def main():
-    print(f"Starting ORM scraper — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"ORM Scraper started — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    if not APIFY_TOKEN:
+        print("ERROR: APIFY_TOKEN secret not set.")
+        return
+
     sheet = get_sheet()
     existing = get_existing_companies(sheet)
-    print(f"Existing prospects: {len(existing)}")
+    print(f"Existing prospects in sheet: {len(existing)}")
 
     all_prospects = []
-
-    for cat_id, cat_name in CATEGORIES:
-        print(f"Scraping Trustpilot: {cat_name}...")
-        results = scrape_trustpilot_category(cat_id, cat_name, existing)
-        all_prospects.extend(results)
-        print(f"  Found: {len(results)}")
-        time.sleep(2)
-
-    g2_categories = [
-        ("crm", "CRM"),
-        ("ecommerce-platforms", "E-commerce"),
-        ("accounting", "Accounting"),
-    ]
-
-    for cat_slug, cat_name in g2_categories:
-        print(f"Scraping G2: {cat_name}...")
-        results = scrape_g2_category(cat_slug, cat_name, existing)
-        all_prospects.extend(results)
-        print(f"  Found: {len(results)}")
-        time.sleep(2)
+    all_prospects.extend(scrape_trustpilot(existing))
+    all_prospects.extend(scrape_g2(existing))
 
     push_to_sheet(sheet, all_prospects)
     print(f"Done. Total new prospects today: {len(all_prospects)}")
