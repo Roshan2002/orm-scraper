@@ -8,8 +8,8 @@ from datetime import datetime
 
 SHEET_ID = "1gqiRjuyaxVuas6dKFseGhbp0wSkY_WLC8KPIEeB9-aY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
-APIFY_BASE = "https://api.apify.com/v2"
+TP_API_KEY = os.environ.get("TRUSTPILOT_API_KEY")
+TP_BASE = "https://api.trustpilot.com/v1"
 
 MIN_RATING = 2.0
 MAX_RATING = 3.9
@@ -17,12 +17,26 @@ MIN_REVIEWS = 50
 MAX_REVIEWS = 2000
 
 SEARCH_QUERIES = [
-    "software company",
-    "ecommerce store",
+    "software",
+    "ecommerce",
     "fintech",
-    "healthcare software",
-    "saas platform",
-    "online marketplace",
+    "saas",
+    "healthcare",
+    "insurance",
+    "hosting",
+    "vpn",
+    "crypto",
+    "travel",
+    "recruitment",
+    "shipping",
+    "furniture",
+    "electronics",
+    "clothing",
+    "beauty",
+    "supplements",
+    "marketing agency",
+    "accounting",
+    "crm",
 ]
 
 
@@ -40,61 +54,59 @@ def get_existing_companies(sheet):
         return set()
 
 
-def run_actor_and_wait(actor_id, input_data, wait=40):
-    resp = requests.post(
-        f"{APIFY_BASE}/acts/{actor_id}/runs",
-        headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
-        json=input_data,
-        timeout=30,
-    )
-    if resp.status_code not in (200, 201):
-        print(f"  Failed to start {actor_id}: {resp.text[:150]}")
-        return []
-
-    run_id = resp.json()["data"]["id"]
-    print(f"  Run started: {run_id}")
-
-    for _ in range(24):
-        time.sleep(5)
-        status_resp = requests.get(
-            f"{APIFY_BASE}/actor-runs/{run_id}",
-            headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+def search_trustpilot(query, page=1):
+    """Search Trustpilot business units by query."""
+    try:
+        resp = requests.get(
+            f"{TP_BASE}/business-units/search",
+            params={
+                "apikey": TP_API_KEY,
+                "query": query,
+                "perPage": 20,
+                "page": page,
+                "country": "US,GB,AU,CA",
+            },
             timeout=15,
         )
-        status = status_resp.json()["data"]["status"]
-        if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
-            print(f"  Status: {status}")
-            break
-
-    if status != "SUCCEEDED":
+        if resp.status_code == 200:
+            return resp.json().get("businesses", [])
+        else:
+            print(f"  API error {resp.status_code}: {resp.text[:100]}")
+            return []
+    except Exception as e:
+        print(f"  Request error: {e}")
         return []
 
-    dataset_id = status_resp.json()["data"]["defaultDatasetId"]
-    results = requests.get(
-        f"{APIFY_BASE}/datasets/{dataset_id}/items?limit=100",
-        headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
-        timeout=30,
-    )
-    return results.json() if isinstance(results.json(), list) else []
+
+def get_business_details(business_id):
+    """Get full details for a business unit."""
+    try:
+        resp = requests.get(
+            f"{TP_BASE}/business-units/{business_id}",
+            params={"apikey": TP_API_KEY},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        return {}
+    except:
+        return {}
 
 
 def scrape_trustpilot(existing):
     prospects = []
 
     for query in SEARCH_QUERIES:
-        print(f"Searching Trustpilot: '{query}'...")
-        items = run_actor_and_wait(
-            "burbn~trustpilot-search-scraper",
-            {"query": query, "maxItems": 100},
-        )
+        print(f"Searching: '{query}'...")
+        businesses = search_trustpilot(query)
 
-        for item in items:
+        for biz in businesses:
             try:
-                name = item.get("name", "").strip()
-                rating = float(item.get("trustScore", item.get("rating", 0)))
-                count = int(item.get("reviewCount", 0))
-                website = item.get("website", item.get("domain", ""))
-                country = item.get("country", "")
+                name = biz.get("displayName", biz.get("name", "")).strip()
+                rating = float(biz.get("score", {}).get("trustScore", 0))
+                count = int(biz.get("numberOfReviews", {}).get("total", 0))
+                website = biz.get("websiteUrl", "")
+                biz_id = biz.get("id", "")
 
                 if not name or name in existing:
                     continue
@@ -103,6 +115,12 @@ def scrape_trustpilot(existing):
                 if not (MIN_REVIEWS <= count <= MAX_REVIEWS):
                     continue
 
+                # Get contact email if available
+                email = ""
+                if biz_id:
+                    details = get_business_details(biz_id)
+                    email = details.get("contact", {}).get("email", "")
+                    time.sleep(0.3)
 
                 prospects.append({
                     "company": name,
@@ -110,6 +128,7 @@ def scrape_trustpilot(existing):
                     "rating": rating,
                     "platform": "Trustpilot",
                     "review_count": count,
+                    "email": email,
                     "pain_point": f"{rating}★ on Trustpilot ({count} reviews) — needs reputation help",
                     "status": "Not contacted",
                 })
@@ -118,8 +137,11 @@ def scrape_trustpilot(existing):
             except Exception:
                 continue
 
-        print(f"  Qualified prospects so far: {len(prospects)}")
-        time.sleep(3)
+        print(f"  Qualified so far: {len(prospects)}")
+        time.sleep(0.5)
+
+        if len(prospects) >= 30:
+            break
 
     return prospects
 
@@ -136,9 +158,9 @@ def push_to_sheet(sheet, prospects):
             str(p["rating"]),
             p["platform"],
             str(p["review_count"]),
-            "",  # Decision maker name
-            "",  # Decision maker LinkedIn
-            "",  # Decision maker email
+            "",           # Decision maker name
+            "",           # Decision maker LinkedIn
+            p["email"],   # Email if available from API
             p["pain_point"],
             p["status"],
         ]
@@ -152,8 +174,8 @@ def push_to_sheet(sheet, prospects):
 def main():
     print(f"ORM Scraper started — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-    if not APIFY_TOKEN:
-        print("ERROR: APIFY_TOKEN not set.")
+    if not TP_API_KEY:
+        print("ERROR: TRUSTPILOT_API_KEY not set.")
         return
 
     sheet = get_sheet()
