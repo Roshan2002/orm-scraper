@@ -1,119 +1,121 @@
+"""
+LinkedIn decision-maker enricher.
+
+Strategy (in order, stops when a result is found):
+1. Google  site:linkedin.com/in  search  →  get profile URL (no login needed)
+2. linkedin-api (unofficial)             →  get full name from profile URL
+3. Fallback: return URL only, name blank
+"""
+
 import os
+import re
 import time
 import random
 import requests
 from bs4 import BeautifulSoup
-from linkedin_api import Linkedin
 
-LINKEDIN_EMAIL = os.environ.get("LINKEDIN_EMAIL")
-LINKEDIN_PASSWORD = os.environ.get("LINKEDIN_PASSWORD")
+try:
+    from linkedin_api import Linkedin as LinkedinAPI
+    _LI_API_AVAILABLE = True
+except ImportError:
+    _LI_API_AVAILABLE = False
 
-DECISION_MAKER_TITLES = [
-    "CEO", "Founder", "Co-Founder", "Owner", "Managing Director",
-    "CMO", "Head of Marketing", "VP Marketing", "Director of Marketing",
-    "Head of Growth", "VP Growth",
+LINKEDIN_EMAIL = os.environ.get("LINKEDIN_EMAIL", "")
+LINKEDIN_PASSWORD = os.environ.get("LINKEDIN_PASSWORD", "")
+
+TITLES = [
+    "CEO", "Founder", "Co-Founder", "Owner",
+    "Managing Director", "CMO", "Head of Marketing",
+    "VP Marketing", "Director of Marketing",
 ]
 
-_linkedin_client = None
+GOOGLE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
+_li_client = None
 
 
-def _get_client():
-    global _linkedin_client
-    if _linkedin_client is None:
-        if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
-            raise EnvironmentError("LINKEDIN_EMAIL and LINKEDIN_PASSWORD secrets not set.")
-        _linkedin_client = Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
-    return _linkedin_client
+def _get_li_client():
+    global _li_client
+    if _li_client is None and _LI_API_AVAILABLE and LINKEDIN_EMAIL and LINKEDIN_PASSWORD:
+        try:
+            _li_client = LinkedinAPI(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
+        except Exception as e:
+            print(f"  LinkedIn API login failed: {e}")
+    return _li_client
 
 
-def _google_search_linkedin(company_name, title):
-    """Search Google for a LinkedIn profile matching company + title."""
-    query = f'site:linkedin.com/in "{title}" "{company_name}"'
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
+def _google_find_linkedin(company, title):
+    query = f'site:linkedin.com/in "{title}" "{company}"'
     try:
         resp = requests.get(
             "https://www.google.com/search",
-            params={"q": query, "num": 5},
-            headers=headers,
-            timeout=10,
+            params={"q": query, "num": 5, "hl": "en"},
+            headers=GOOGLE_HEADERS,
+            timeout=12,
         )
         if resp.status_code != 200:
             return None
-
         soup = BeautifulSoup(resp.text, "html.parser")
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if "linkedin.com/in/" in href:
-                # Extract clean URL from Google redirect
                 if href.startswith("/url?q="):
                     href = href.split("/url?q=")[1].split("&")[0]
-                if "linkedin.com/in/" in href:
-                    return href.split("?")[0].rstrip("/")
+                match = re.search(r"linkedin\.com/in/([\w\-]+)", href)
+                if match:
+                    return f"https://www.linkedin.com/in/{match.group(1)}"
     except Exception:
         pass
     return None
 
 
-def _extract_public_id(linkedin_url):
-    """Get the public profile ID from a LinkedIn URL."""
+def _get_name_from_api(public_id):
+    client = _get_li_client()
+    if not client:
+        return ""
     try:
-        return linkedin_url.rstrip("/").split("/in/")[1].split("/")[0]
+        profile = client.get_profile(public_id)
+        first = profile.get("firstName", "")
+        last = profile.get("lastName", "")
+        return f"{first} {last}".strip()
     except Exception:
-        return None
+        return ""
 
 
-def find_decision_maker(company_name):
-    """
-    Returns dict with keys: name, linkedin_url
-    Tries each decision-maker title until one is found.
-    """
+def find_decision_maker(company):
     result = {"name": "", "linkedin_url": ""}
 
-    for title in DECISION_MAKER_TITLES:
-        url = _google_search_linkedin(company_name, title)
-        # Respect Google rate limits
-        time.sleep(random.uniform(3, 6))
+    for title in TITLES:
+        url = _google_find_linkedin(company, title)
+        time.sleep(random.uniform(3, 6))  # respect Google rate limits
 
         if not url:
             continue
 
-        public_id = _extract_public_id(url)
-        if not public_id:
-            continue
+        result["linkedin_url"] = url
 
-        # Try to get the full name from LinkedIn API
-        try:
-            client = _get_client()
-            profile = client.get_profile(public_id)
-            first = profile.get("firstName", "")
-            last = profile.get("lastName", "")
-            name = f"{first} {last}".strip()
+        # Try to get name via linkedin-api
+        match = re.search(r"linkedin\.com/in/([\w\-]+)", url)
+        if match:
+            name = _get_name_from_api(match.group(1))
             if name:
                 result["name"] = name
-                result["linkedin_url"] = url
-                # Slow down to avoid LinkedIn flagging the account
-                time.sleep(random.uniform(4, 8))
+                time.sleep(random.uniform(3, 6))
                 return result
-        except Exception:
-            # If API fails, still return the URL with name from Google snippet
-            result["linkedin_url"] = url
-            time.sleep(random.uniform(2, 4))
-            continue
+
+        # URL found but no name — still useful, return it
+        return result
 
     return result
 
 
 def enrich_prospects(prospects):
-    """
-    Takes a list of prospect dicts and fills in decision_maker_name
-    and decision_maker_linkedin for each.
-    """
     if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
         print("LinkedIn credentials not set — skipping enrichment.")
         return prospects
@@ -121,13 +123,11 @@ def enrich_prospects(prospects):
     print(f"Enriching {len(prospects)} prospects with LinkedIn data...")
     for i, p in enumerate(prospects):
         company = p.get("company", "")
-        print(f"  [{i+1}/{len(prospects)}] Finding decision maker for: {company}")
+        print(f"  [{i+1}/{len(prospects)}] {company}")
         dm = find_decision_maker(company)
         p["decision_maker_name"] = dm["name"]
         p["decision_maker_linkedin"] = dm["linkedin_url"]
-        if dm["name"] or dm["linkedin_url"]:
-            print(f"    Found: {dm['name']} — {dm['linkedin_url']}")
-        else:
-            print(f"    Not found.")
+        status = f"{dm['name']} — {dm['linkedin_url']}" if dm["name"] or dm["linkedin_url"] else "not found"
+        print(f"    {status}")
 
     return prospects
