@@ -1,7 +1,9 @@
-requests==2.31.0
-cloudscraper==1.2.71
-beautifulsoup4==4.12.3
+playwright==1.44.0
+playwright-stealth==1.0.6
+pandas==2.2.2
 gspread==6.1.2
 google-auth==2.29.0
 linkedin-api==2.1.0
+requests==2.31.0
+beautifulsoup4==4.12.3
 lxml==5.2.2

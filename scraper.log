@@ -1,0 +1,26 @@
+ORM Scraper started — 2026-05-21 01:14
+Traceback (most recent call last):
+  File "/Users/roshannishad/orm-scraper/scripts/scraper.py", line 65, in <module>
+    main()
+  File "/Users/roshannishad/orm-scraper/scripts/scraper.py", line 54, in main
+    sheet = get_sheet()
+            ^^^^^^^^^^^
+  File "/Users/roshannishad/orm-scraper/scripts/scraper.py", line 15, in get_sheet
+    creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS"))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/json/__init__.py", line 339, in loads
+    raise TypeError(f'the JSON object must be str, bytes or bytearray, '
+TypeError: the JSON object must be str, bytes or bytearray, not NoneType
+ORM Scraper started — 2026-05-21 01:14
+Traceback (most recent call last):
+  File "/Users/roshannishad/orm-scraper/scripts/scraper.py", line 65, in <module>
+    main()
+  File "/Users/roshannishad/orm-scraper/scripts/scraper.py", line 54, in main
+    sheet = get_sheet()
+            ^^^^^^^^^^^
+  File "/Users/roshannishad/orm-scraper/scripts/scraper.py", line 15, in get_sheet
+    creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS"))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/json/__init__.py", line 339, in loads
+    raise TypeError(f'the JSON object must be str, bytes or bytearray, '
+TypeError: the JSON object must be str, bytes or bytearray, not NoneType
