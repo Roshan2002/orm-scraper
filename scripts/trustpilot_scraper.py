@@ -1,8 +1,14 @@
-import requests
 import json
 import time
 import random
 from bs4 import BeautifulSoup
+
+try:
+    import cloudscraper
+    _session = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+except ImportError:
+    import requests as _req_fallback
+    _session = _req_fallback.Session()
 
 MIN_RATING = 2.0
 MAX_RATING = 3.9
@@ -52,23 +58,27 @@ def _get_category_companies(category_slug, page=1):
         f"?numberofreviews=0&status=all&page={page}"
     )
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = _session.get(url, headers=HEADERS, timeout=20)
+        print(f"    HTTP {resp.status_code} for {category_slug} p{page}")
         if resp.status_code != 200:
             return []
         data = _extract_next_data(resp.text)
         if not data:
+            print(f"    No __NEXT_DATA__ found for {category_slug}")
             return []
-        # Path varies slightly by Trustpilot version — try both
+        # Try every known path Trustpilot has used
         props = data.get("props", {}).get("pageProps", {})
         businesses = (
             props.get("businessUnits")
             or props.get("businesses")
             or props.get("categoryBusinessList", {}).get("businessUnits", [])
+            or props.get("categoryPage", {}).get("businessUnits", [])
             or []
         )
+        print(f"    Raw businesses returned: {len(businesses)}")
         return businesses
     except Exception as e:
-        print(f"  Error fetching category {category_slug}: {e}")
+        print(f"    Error fetching {category_slug}: {e}")
         return []
 
 
