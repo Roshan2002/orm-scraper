@@ -5,6 +5,7 @@ import json
 import os
 import time
 from datetime import datetime
+from linkedin_enricher import enrich_prospects
 
 SHEET_ID = "1gqiRjuyaxVuas6dKFseGhbp0wSkY_WLC8KPIEeB9-aY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -129,6 +130,8 @@ def scrape_trustpilot(existing):
                     "platform": "Trustpilot",
                     "review_count": count,
                     "email": email,
+                    "decision_maker_name": "",
+                    "decision_maker_linkedin": "",
                     "pain_point": f"{rating}★ on Trustpilot ({count} reviews) — needs reputation help",
                     "status": "Not contacted",
                 })
@@ -158,9 +161,9 @@ def push_to_sheet(sheet, prospects):
             str(p["rating"]),
             p["platform"],
             str(p["review_count"]),
-            "",           # Decision maker name
-            "",           # Decision maker LinkedIn
-            p["email"],   # Email if available from API
+            p.get("decision_maker_name", ""),
+            p.get("decision_maker_linkedin", ""),
+            p["email"],
             p["pain_point"],
             p["status"],
         ]
@@ -183,6 +186,7 @@ def main():
     print(f"Existing prospects: {len(existing)}")
 
     prospects = scrape_trustpilot(existing)
+    prospects = enrich_prospects(prospects)
     push_to_sheet(sheet, prospects)
     print(f"Done. Total new prospects today: {len(prospects)}")
 
